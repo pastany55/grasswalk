@@ -1,1 +1,149 @@
+import pygame
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from noise import pnoise2
+import math
+import requests
+import os
+import ctypes
 
+# --- 1. 設定・隠しファイル保存 ---
+def get_hidden_path():
+    hidden_dir = os.path.join(os.path.expanduser("~"), ".cache_grasswalk")
+    if not os.path.exists(hidden_dir):
+        os.makedirs(hidden_dir)
+        if os.name == 'nt':
+            ctypes.windll.kernel32.SetFileAttributesW(hidden_dir, 0x02)
+    return os.path.join(hidden_dir, "grass.png")
+
+def load_texture_from_url(url):
+    save_path = get_hidden_path()
+    if not os.path.exists(save_path):
+        response = requests.get(url)
+        with open(save_path, 'wb') as f:
+            f.write(response.content)
+    
+    surface = pygame.image.load(save_path)
+    data = pygame.image.tostring(surface, "RGBA", 1)
+    width, height = surface.get_size()
+    
+    tex_id = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, tex_id)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    return tex_id
+
+# --- 2. 初期化 ---
+pygame.init()
+display = [800, 600]
+screen = pygame.display.set_mode(display, DOUBLEBUF | OPENGL | RESIZABLE)
+pygame.display.set_caption('Green Grass Walk - Fixed')
+
+grass_texture = load_texture_from_url("https://raw.githubusercontent.com/pastany55/grasswalk/main/grass.png")
+
+player_x, player_z = 0.0, 0.0
+player_y = 65.0
+velocity_y = 0.0
+GRAVITY = -32.0
+JUMP_FORCE = 12.0
+is_grounded = False
+PLAYER_HEIGHT = 2.1
+yaw, pitch = 0.0, 0.0
+
+def get_node_height(x, z):
+    return (pnoise2(x / 16.0, z / 16.0, octaves=2) * 12.0) + \
+           (pnoise2(x / 50.0, z / 50.0, octaves=4) * 28.0)
+
+def update_projection():
+    glViewport(0, 0, display[0], display[1])
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(80, display[0] / display[1], 0.1, 300.0)
+
+glEnable(GL_DEPTH_TEST)
+glEnable(GL_POLYGON_OFFSET_FILL)
+glPolygonOffset(1.0, 1.0)
+glEnable(GL_TEXTURE_2D)
+update_projection()
+
+clock = pygame.time.Clock()
+pygame.mouse.set_visible(False)
+pygame.event.set_grab(True)
+
+# --- 3. メインループ ---
+running = True
+while running:
+    dt = clock.tick(75) / 1000.0
+    
+    for event in pygame.event.get():
+        if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
+            running = False
+        elif event.type == VIDEORESIZE:
+            display = [event.w, event.h]
+            update_projection()
+
+    # 物理・移動演算
+    ground_y = get_node_height(player_x, player_z)
+    target_eye_y = ground_y + PLAYER_HEIGHT
+    if player_y > target_eye_y or velocity_y > 0:
+        velocity_y += GRAVITY * dt
+        player_y += velocity_y * dt
+        if player_y <= target_eye_y:
+            player_y = target_eye_y
+            velocity_y = 0
+            is_grounded = True
+    else:
+        player_y = target_eye_y
+        is_grounded = True
+
+    keys = pygame.key.get_pressed()
+    mouse_dx, mouse_dy = pygame.mouse.get_rel()
+    yaw += mouse_dx * 0.2
+    pitch = max(-89, min(89, pitch + mouse_dy * 0.2))
+    
+    yaw_rad = math.radians(yaw)
+    # 移動速度を 10.0 に設定
+    dx = (keys[K_d] - keys[K_a]) * 10.0 * dt
+    dz = (keys[K_w] - keys[K_s]) * 10.0 * dt
+    player_x += (dx * math.cos(yaw_rad) + dz * math.sin(yaw_rad))
+    player_z += (dx * math.sin(yaw_rad) - dz * math.cos(yaw_rad))
+
+    if keys[K_SPACE] and is_grounded:
+        velocity_y = JUMP_FORCE
+        is_grounded = False
+
+    # 描画
+    glClearColor(0.5, 0.75, 1.0, 1.0)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glRotatef(pitch, 1, 0, 0)
+    glRotatef(yaw, 0, 1, 0)
+    glTranslatef(-player_x, -player_y, -player_z)
+
+    glBindTexture(GL_TEXTURE_2D, grass_texture)
+    glBegin(GL_TRIANGLES)
+    range_val = 35
+    
+    # グリッドのズレを防ぐため、常に2の倍数で切り捨てる
+    start_x = (int(player_x) // 2) * 2 - range_val
+    start_z = (int(player_z) // 2) * 2 - range_val
+    
+    for x in range(start_x, start_x + range_val * 2, 2):
+        for z in range(start_z, start_z + range_val * 2, 2):
+            coords = [(x, z), (x+2, z), (x+2, z+2), (x, z+2)]
+            hs = [get_node_height(c[0], c[1]) for c in coords]
+            
+            for i in [0, 1, 2]:
+                glTexCoord2f(coords[i][0]/4, coords[i][1]/4)
+                glVertex3f(coords[i][0], hs[i], coords[i][1])
+            for i in [0, 2, 3]:
+                glTexCoord2f(coords[i][0]/4, coords[i][1]/4)
+                glVertex3f(coords[i][0], hs[i], coords[i][1])
+    glEnd()
+
+    pygame.display.flip()
+
+pygame.quit()
